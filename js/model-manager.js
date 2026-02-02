@@ -1,47 +1,30 @@
 import { app } from "../../scripts/app.js";
 import { $el } from "../../scripts/ui.js";
-import { 
-	manager_instance, rebootAPI, 
+import {
+	manager_instance, rebootAPI,
 	fetchData, md5, icons, show_message, customAlert, infoToast, showTerminal,
-	storeColumnWidth, restoreColumnWidth, loadCss
+	storeColumnWidth, restoreColumnWidth, loadCss, handle403Response
 } from  "./common.js";
 import { api } from "../../scripts/api.js";
 
 // https://cenfun.github.io/turbogrid/api.html
 import TG from "./turbogrid.esm.js";
+import { buildGuiFrameCustomHeader,  createSettingsCombo } from "./comfyui-gui-builder.js";
 
 loadCss("./model-manager.css");
 
 const gridId = "model";
 
 const pageHtml = `
-<div class="cmm-manager-header">
-	<label>Filter
-		<select class="cmm-manager-filter"></select>
-	</label>
-	<label>Type
-		<select class="cmm-manager-type"></select>
-	</label>
-	<label>Base
-		<select class="cmm-manager-base"></select>
-	</label>
-	<input class="cmm-manager-keywords" type="search" placeholder="Search" />
-	<div class="cmm-manager-status"></div>
-	<div class="cmm-flex-auto"></div>
-</div>
-<div class="cmm-manager-grid"></div>
-<div class="cmm-manager-selection"></div>
-<div class="cmm-manager-message"></div>
-<div class="cmm-manager-footer">
-	<button class="cmm-manager-back">
-		<svg class="arrow-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-			<path d="M2 8H18M2 8L8 2M2 8L8 14" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-		</svg>
-		Back
-	</button>
-	<button class="cmm-manager-refresh">Refresh</button>
-	<button class="cmm-manager-stop">Stop</button>
-	<div class="cmm-flex-auto"></div>
+<div class="cmm-manager cmm-manager-dark">
+	<div class="cmm-manager-grid"></div>
+	<div class="cmm-manager-selection"></div>
+	<div class="cmm-manager-message"></div>
+	<div class="cmm-manager-footer">
+		<button class="cmm-manager-refresh p-button p-component">Refresh</button>
+		<button class="cmm-manager-stop p-button p-component">Stop</button>
+		<div class="cmm-flex-auto"></div>
+	</div>
 </div>
 `;
 
@@ -64,11 +47,23 @@ export class ModelManager {
 	}
 
 	init() {
-		this.element = $el("div", {
-			parent: document.body,
-			className: "comfy-modal cmm-manager"
-		});
-		this.element.innerHTML = pageHtml;
+		const header = $el("div.cmm-manager-header", {}, [
+			createSettingsCombo("Filter", $el("select.cmm-manager-filter")),
+			createSettingsCombo("Type", $el("select.cmm-manager-type")),
+			createSettingsCombo("Base", $el("select.cmm-manager-base")),
+			$el("input.cmm-manager-keywords.p-inputtext.p-component", { type: "search", placeholder: "Search" }),
+			$el("div.cmm-manager-status"),
+			$el("div.cmm-flex-auto")
+		]);
+
+		const frame = buildGuiFrameCustomHeader(
+			'cmm-manager-dialog', // dialog id
+			header, // custom header element
+			pageHtml, // dialog content element
+			this
+		);	// send this so we can attach close functions
+
+		this.element = frame;
 		this.initFilter();
 		this.bindEvents();
 		this.initGrid();
@@ -81,10 +76,13 @@ export class ModelManager {
 			value: ""
 		}, {
 			label: "Installed",
-			value: "True"
+			value: "installed"
 		}, {
 			label: "Not Installed",
-			value: "False"
+			value: "not_installed"
+		}, {
+			label: "In Workflow",
+			value: "in_workflow"
 		}];
 
 		this.typeList = [{
@@ -254,12 +252,31 @@ export class ModelManager {
 			rowFilter: (rowItem) => {
 
 				const searchableColumns = ["name", "type", "base", "description", "filename", "save_path"];
+				const models_extensions = ['.ckpt', '.pt', '.pt2', '.bin', '.pth', '.safetensors', '.pkl', '.sft'];
 
 				let shouldShown = grid.highlightKeywordsFilter(rowItem, searchableColumns, this.keywords);
 
 				if (shouldShown) {
-					if(this.filter && rowItem.installed !== this.filter) {
-						return false;
+					if(this.filter) {
+						if (this.filter == "in_workflow") {
+							rowItem.in_workflow = null;
+							if (Array.isArray(app.graph._nodes)) {
+								app.graph._nodes.forEach((item, i) => {
+									if (Array.isArray(item.widgets_values)) {
+										item.widgets_values.forEach((_item, i) => {
+											if (rowItem.in_workflow === null && _item !== null && models_extensions.includes("." + _item.toString().split('.').pop())) {
+												let filename = _item.match(/([^\/]+)(?=\.\w+$)/)[0];
+												if (grid.highlightKeywordsFilter(rowItem, searchableColumns, filename)) {
+													rowItem.in_workflow = "True";
+													grid.highlightKeywordsFilter(rowItem, searchableColumns, "");
+												}
+											}
+										});
+									}
+								});
+							}
+						}
+						return ((this.filter == "installed" && rowItem.installed == "True") || (this.filter == "not_installed" && rowItem.installed == "False") || (this.filter == "in_workflow" && rowItem.in_workflow == "True"));
 					}
 
 					if(this.type && rowItem.type !== this.type) {
@@ -325,7 +342,7 @@ export class ModelManager {
 				if (installed === "True") {
 					return `<div class="cmm-icon-passed">${icons.passed}</div>`;
 				}
-				return `<button class="cmm-btn-install" mode="install">Install</button>`;
+				return `<button class="cmm-btn-install p-button p-component" mode="install">Install</button>`;
 			}
 		}, {
 			id: 'url',
@@ -398,7 +415,7 @@ export class ModelManager {
 		}
 
 		this.selectedModels = selectedList;
-		this.showSelection(`<span>Selected <b>${selectedList.length}</b> models <button class="cmm-btn-install" mode="install">Install</button>`);
+		this.showSelection(`<span>Selected <b>${selectedList.length}</b> models <button class="cmm-btn-install p-button p-component" mode="install">Install</button>`);
 	}
 
 	focusInstall(item) {
@@ -455,7 +472,16 @@ export class ModelManager {
 				errorMsg = `'${item.name}': `;
 
 				if(res.status == 403) {
-					errorMsg += `This action is not allowed with this security level configuration.\n`;
+					try {
+						const data = await res.json();
+						if(data.error === 'comfyui_outdated') {
+							errorMsg += `ComfyUI version is outdated. Please update ComfyUI to use Manager normally.\n`;
+						} else {
+							errorMsg += `This action is not allowed with this security level configuration.\n`;
+						}
+					} catch {
+						errorMsg += `This action is not allowed with this security level configuration.\n`;
+					}
 				} else {
 					errorMsg += await res.text() + '\n';
 				}

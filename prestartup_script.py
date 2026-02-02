@@ -38,10 +38,9 @@ else:
     def current_timestamp():
         return str(time.time()).split('.')[0]
 
-security_check.security_check()
 
-cm_global.pip_blacklist = {'torch', 'torchsde', 'torchvision'}
-cm_global.pip_downgrade_blacklist = ['torch', 'torchsde', 'torchvision', 'transformers', 'safetensors', 'kornia']
+cm_global.pip_blacklist = {'torch', 'torchaudio', 'torchsde', 'torchvision'}
+cm_global.pip_downgrade_blacklist = ['torch', 'torchaudio', 'torchsde', 'torchvision', 'transformers', 'safetensors', 'kornia']
 
 
 def skip_pip_spam(x):
@@ -86,7 +85,15 @@ cm_global.register_api('cm.is_import_failed_extension', is_import_failed_extensi
 comfyui_manager_path = os.path.abspath(os.path.dirname(__file__))
 
 custom_nodes_base_path = folder_paths.get_folder_paths('custom_nodes')[0]
-manager_files_path = os.path.abspath(os.path.join(folder_paths.get_user_directory(), 'default', 'ComfyUI-Manager'))
+
+# Check for System User API availability (PR #10966)
+_has_system_user_api = hasattr(folder_paths, 'get_system_user_directory')
+
+if _has_system_user_api:
+    manager_files_path = os.path.abspath(os.path.join(folder_paths.get_user_directory(), '__manager'))
+else:
+    manager_files_path = os.path.abspath(os.path.join(folder_paths.get_user_directory(), 'default', 'ComfyUI-Manager'))
+
 manager_pip_overrides_path = os.path.join(manager_files_path, "pip_overrides.json")
 manager_pip_blacklist_path = os.path.join(manager_files_path, "pip_blacklist.list")
 restore_snapshot_path = os.path.join(manager_files_path, "startup-scripts", "restore-snapshot.json")
@@ -119,14 +126,14 @@ def check_file_logging():
 
 read_config()
 read_uv_mode()
+security_check.security_check()
 check_file_logging()
 
-cm_global.pip_overrides = {'numpy': 'numpy<2', 'ultralytics': 'ultralytics==8.3.40'}
+cm_global.pip_overrides = {}
+
 if os.path.exists(manager_pip_overrides_path):
     with open(manager_pip_overrides_path, 'r', encoding="UTF-8", errors="ignore") as json_file:
         cm_global.pip_overrides = json.load(json_file)
-        cm_global.pip_overrides['numpy'] = 'numpy<2'
-        cm_global.pip_overrides['ultralytics'] = 'ultralytics==8.3.40'  # for security
 
 
 if os.path.exists(manager_pip_blacklist_path):
@@ -339,7 +346,12 @@ try:
                     log_file.write(message)
                 else:
                     log_file.write(f"[{timestamp}] {message}")
-                log_file.flush()
+
+                try:
+                    log_file.flush()
+                except Exception:
+                    pass
+
                 self.last_char = message if message == '' else message[-1]
 
             if not file_only:
@@ -352,13 +364,19 @@ try:
                         original_stderr.flush()
 
         def flush(self):
-            log_file.flush()
+            try:
+                log_file.flush()
+            except Exception:
+                pass
 
             with std_log_lock:
-                if self.is_stdout:
-                    original_stdout.flush()
-                else:
-                    original_stderr.flush()
+                try:
+                    if self.is_stdout:
+                        original_stdout.flush()
+                    else:
+                        original_stderr.flush()
+                except (OSError, ValueError):
+                    pass
 
         def close(self):
             self.flush()
@@ -509,7 +527,8 @@ check_bypass_ssl()
 
 # Perform install
 processed_install = set()
-script_list_path = os.path.join(folder_paths.user_directory, "default", "ComfyUI-Manager", "startup-scripts", "install-scripts.txt")
+# Use manager_files_path for consistency (fixes path inconsistency bug)
+script_list_path = os.path.join(manager_files_path, "startup-scripts", "install-scripts.txt")
 pip_fixer = manager_util.PIPFixer(manager_util.get_installed_packages(), comfy_path, manager_files_path)
 
 
@@ -621,6 +640,7 @@ def execute_lazy_install_script(repo_path, executable):
         lines = manager_util.robust_readlines(requirements_path)
         for line in lines:
             package_name = remap_pip_package(line.strip())
+            package_name = package_name.split('#')[0].strip()
             if package_name and not is_installed(package_name):
                 if '--index-url' in package_name:
                     s = package_name.split('--index-url')
@@ -785,7 +805,11 @@ def execute_startup_script():
 
 
 # Check if script_list_path exists
-if os.path.exists(script_list_path):
+# Block startup-scripts on old ComfyUI (security measure)
+if not _has_system_user_api:
+    if os.path.exists(script_list_path):
+        print("[ComfyUI-Manager] Startup scripts blocked on old ComfyUI version.")
+elif os.path.exists(script_list_path):
     execute_startup_script()
 
 
